@@ -316,10 +316,13 @@ def probe_egress(port: int, timeout: float = 12.0) -> Tuple[bool, Optional[str]]
         )
         with opener.open("https://api.ipify.org", timeout=timeout) as r:
             return True, r.read().decode().strip()
-    except Exception:       # noqa: BLE001
-        # Fall back to the cheap check so a missing PySocks doesn't
-        # make every slot look dead.
-        return probe(port, timeout=5.0), None
+    except Exception as e:
+        # Only fall back to cheap check if PySocks is genuinely missing.
+        # If it's a timeout or connection error, the tunnel is DEAD.
+        if "unknown url type" in str(e).lower():
+            log.warning("PySocks is missing! Falling back to weak check.")
+            return probe(port, timeout=5.0), None
+        return False, str(e)
 
 
 def health_snapshot(deep: bool = False) -> Dict:
