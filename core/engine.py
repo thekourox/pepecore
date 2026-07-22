@@ -248,6 +248,16 @@ def stop_all() -> int:
     return count
 
 
+def _purge_ghosts() -> None:
+    """Kill all wireproxy processes to prevent Key Collision and UDP flooding from old tests."""
+    log.info("Purging all existing wireproxy ghost processes...")
+    try:
+        subprocess.run(["killall", "-9", "wireproxy"], check=False, stderr=subprocess.DEVNULL)
+        time.sleep(1.0)
+    except Exception:
+        pass
+
+
 def recover_all(stagger: Optional[float] = None) -> int:
     """
     Bring every occupied slot back up. Called on boot. Reads only the
@@ -259,6 +269,7 @@ def recover_all(stagger: Optional[float] = None) -> int:
     result is that a large share of them fail and have to be retried. The
     pacing below trades a slower boot for tunnels that actually come up.
     """
+    _purge_ghosts()
     stop_all()
     time.sleep(1.5)
 

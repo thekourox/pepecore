@@ -17,10 +17,10 @@ from . import engine, registry
 
 log = logging.getLogger("pepecore.watchdog")
 
-CHECK_INTERVAL = 15         # seconds between sweeps (Aggressive for discovery)
+CHECK_INTERVAL = 120        # seconds between sweeps (Reverted to prevent DDoS triggers)
 HEALTHY_CHECK_INTERVAL = 120 # seconds before re-checking a healthy slot
-FAILS_BEFORE_SWAP = 1       # consecutive failures before we replace the server
-BOOT_GRACE = 15             # let handshakes settle after startup
+FAILS_BEFORE_SWAP = 2       # consecutive failures before we replace the server (Reverted)
+BOOT_GRACE = 90             # let handshakes settle after startup (Reverted)
 SWAP_GAP = 1.5              # pause between swaps, avoids rate limiting
 
 
