@@ -119,6 +119,11 @@ class PinRequest(BaseModel):
     identity_id: Optional[str] = None
 
 
+class AutoFillRequest(BaseModel):
+    count: Optional[int] = None
+    pin: bool = False
+
+
 class SlotsEnsure(BaseModel):
     count: int = Field(ge=1, le=256)
 
