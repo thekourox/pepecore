@@ -36,8 +36,8 @@ import os
 
 # --- the layout ------------------------------------------------------
 
-SOCKS_BASE_PORT = int(os.environ.get("PEPECORE_SOCKS_BASE", 30000))
-INBOUND_BASE_PORT = int(os.environ.get("PEPECORE_INBOUND_BASE", 40000))
+SOCKS_BASE_PORT = int(os.environ.get("PEPECORE_SOCKS_BASE", 20000))
+INBOUND_BASE_PORT = int(os.environ.get("PEPECORE_INBOUND_BASE", 10000))
 
 # Hard ceiling on slots. Keeps the two ranges from ever colliding and stops
 # a typo from trying to reserve 50,000 ports.
