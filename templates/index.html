@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PepeCore</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="loginOverlay" class="login-overlay" style="display:none;">
+  <div class="login-box">
+    <h2><span class="dot"></span> PepeCore Login</h2>
+    <div class="form col">
+      <input id="lUser" placeholder="Username">
+      <input id="lPass" type="password" placeholder="Password" onkeypress="if(event.key === 'Enter') doLogin()">
+      <button class="btn" onclick="doLogin()">Log in</button>
+    </div>
+  </div>
+</div>
+
+<header class="topbar">
+  <div class="brand"><span class="dot"></span> PepeCore <span class="ver">v2</span></div>
+  <div style="display:flex; gap:15px; align-items:center;">
+    <div class="bind-state" id="bindState">—</div>
+    <button class="btn ghost sm" id="btnLogout" style="display:none;" onclick="doLogout()">Logout</button>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-view="setup">Setup</button>
+  <button class="tab" data-view="slots">Slots</button>
+  <button class="tab" data-view="keys">Keys</button>
+  <button class="tab" data-view="ports">Ports</button>
+  <button class="tab" data-view="logs">Logs</button>
+</nav>
+
+<main>
+
+<section class="view active" id="view-setup">
+
+  <div class="stats">
+    <div class="stat"><span class="num" id="sTotal">0</span><span class="lbl">Slots</span></div>
+    <div class="stat up"><span class="num" id="sAlive">0</span><span class="lbl">Up</span></div>
+    <div class="stat down"><span class="num" id="sDead">0</span><span class="lbl">Down</span></div>
+    <div class="stat idle"><span class="num" id="sEmpty">0</span><span class="lbl">Empty</span></div>
+  </div>
+
+  <div class="row">
+    <button class="btn ghost" onclick="act('/api/engine/recover','POST')">Restart all tunnels</button>
+    <button class="btn ghost" onclick="refresh(true)">Deep health check</button>
+    <button class="btn danger ghost" onclick="confirmStop()">Stop engine</button>
+  </div>
+
+  <div id="wdBox"></div>
+
+  <h3>Capacity</h3>
+  <div class="form">
+    <input id="capSlots" type="number" min="1" placeholder="how many slots?" value="140">
+    <button class="btn ghost" onclick="checkCapacity()">Check this machine</button>
+  </div>
+  <div id="capInfo"></div>
+
+  <h3>First-time setup</h3>
+  <p class="hint">Work down the steps. Only the last one talks to the panel.</p>
+
+  <div class="step" id="step1">
+    <div class="step-head"><span class="step-n">1</span>
+      <div><b>Add your Surfshark key</b>
+        <div class="sub">The WireGuard private key from your Surfshark account.</div></div>
+      <span class="step-mark" id="mark1"></span>
+    </div>
+    <div class="step-body">
+      <div class="form">
+        <input id="kNew" placeholder="WireGuard private key">
+        <input id="kAddr" placeholder="10.14.0.2/16" value="10.14.0.2/16">
+        <input id="kLabel" placeholder="label (optional)">
+        <button class="btn" onclick="addKey()">Add key</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="step" id="step2">
+    <div class="step-head"><span class="step-n">2</span>
+      <div><b>Reserve slots</b>
+        <div class="sub">Reserve more than you need — adding slots later is the only
+        thing that requires binding again. Empty slots cost nothing.</div></div>
+      <span class="step-mark" id="mark2"></span>
+    </div>
+    <div class="step-body">
+      <div class="form">
+        <input id="slotCount" type="number" min="1" max="256" value="25">
+        <button class="btn" onclick="ensureSlots()">Reserve</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="step" id="step3">
+    <div class="step-head"><span class="step-n">3</span>
+      <div><b>Fill slots with countries</b>
+        <div class="sub">Each slot gets a different country and is pinned to it.
+        Fine-tune afterwards on the Slots tab.</div></div>
+      <span class="step-mark" id="mark3"></span>
+    </div>
+    <div class="step-body">
+      <div class="form">
+        <input id="fillCount" type="number" min="0" placeholder="0 = all empty" value="0">
+        <button class="btn" onclick="autofill()">Auto-fill &amp; pin</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="step" id="step4">
+    <div class="step-head"><span class="step-n">4</span>
+      <div><b>Bind ports to the panel</b>
+        <div class="sub">Run once. After this, key and country changes never touch
+        the panel again.</div></div>
+      <span class="step-mark" id="mark4"></span>
+    </div>
+    <div class="step-body">
+      <div class="form col">
+        <label>Panel URL</label>
+        <input id="pHost" placeholder="https://panel.example.com">
+        <label>Admin API token</label>
+        <input id="pToken" type="password" placeholder="token">
+        <button class="btn ghost" onclick="loadPanel()">Connect to panel</button>
+      </div>
+
+      <div class="form col" id="bindForm" style="display:none">
+        <label>Core</label>
+        <select id="pCore"></select>
+        <label>Template host (its inbound is cloned for each slot)</label>
+        <select id="pHostSel"></select>
+        <label>Slots to bind</label>
+        <input id="pSlots" type="number" value="25" min="1" max="256">
+        <label>Node IP as Xray sees it</label>
+        <input id="pNodeIp" value="127.0.0.1">
+        <button class="btn" onclick="doBind()">Bind</button>
+      </div>
+
+      <div class="row" id="panelOps" style="display:none">
+        <button class="btn sm ghost" onclick="toggleHosts(true)">Enable hosts</button>
+        <button class="btn sm ghost" onclick="toggleHosts(false)">Disable hosts</button>
+        <button class="btn sm danger ghost" onclick="doUnbind()">Unbind everything</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="view" id="view-slots">
+  <div class="banner ok">
+    A slot's <strong>port and country are both fixed</strong>. Key rotations and
+    server failures cannot change either one.
+  </div>
+
+  <div class="row">
+    <input id="slotFilter" class="mini" placeholder="filter by country..." oninput="renderSlots()">
+    <button class="btn sm ghost" onclick="autofill()">Fill empty slots</button>
+    <button class="btn sm ghost" onclick="loadServers(true)">Reload server list</button>
+  </div>
+
+  <div id="slotList" class="list"></div>
+</section>
+
+<section class="view" id="view-keys">
+  <div class="banner warn">
+    <strong>Rotating a key does not require re-injection.</strong>
+    Affected tunnels restart on their existing ports; inbounds, UUIDs and user
+    subscriptions are untouched.
+  </div>
+
+  <div id="keyLoad"></div>
+
+  <h3>Keys</h3>
+  <div id="keyList" class="list"></div>
+
+  <h3>Scheduled rotation</h3>
+  <p class="hint">Reshuffles which key serves which slot on a timer, so no
+  keypair holds the same long-lived set of sessions. Ports, countries and user
+  configs are untouched. Needs at least two keys to do anything.</p>
+
+  <div class="form">
+    <label class="chk"><input type="checkbox" id="rotOn"> enabled</label>
+    <select id="rotInterval" class="mini">
+      <option value="1">every 1 hour</option>
+      <option value="2">every 2 hours</option>
+      <option value="3" selected>every 3 hours</option>
+      <option value="6">every 6 hours</option>
+      <option value="12">every 12 hours</option>
+      <option value="24">every 24 hours</option>
+    </select>
+    <button class="btn" onclick="saveRotator()">Save</button>
+    <button class="btn ghost" onclick="rotateNow()">Rotate now</button>
+  </div>
+  <div id="rotInfo"></div>
+
+  <h3>Add another key</h3>
+  <p class="hint">Several keypairs can live on one Surfshark account — generate
+  them in the account's WireGuard section. If one key gets culled, rotate only
+  that one; slots on other keys aren't even restarted.</p>
+  <div class="form">
+    <input id="kNew2" placeholder="WireGuard private key">
+    <input id="kAddr2" placeholder="10.14.0.2/16" value="10.14.0.2/16">
+    <input id="kLabel2" placeholder="label">
+    <button class="btn" onclick="addKey(true)">Add</button>
+  </div>
+
+  <h3>Bulk import</h3>
+  <p class="hint">For large deployments. Paste one key per line,
+  <code>label: key</code>, <code>key,address</code>, or whole
+  <code>[Interface]</code> blocks. Duplicates are skipped.</p>
+  <div class="form col">
+    <textarea id="kBlob" rows="6" placeholder="key1&#10;key2&#10;key3&#10;..."></textarea>
+    <div class="form">
+      <input id="kBlobAddr" placeholder="10.14.0.2/16" value="10.14.0.2/16">
+      <button class="btn" onclick="importKeys()">Import &amp; spread</button>
+    </div>
+  </div>
+  <div class="row">
+    <button class="btn ghost" onclick="act('/api/engine/identities/rebalance','POST')">
+      Spread keys evenly across slots
+    </button>
+  </div>
+</section>
+
+<section class="view" id="view-ports">
+  <div class="banner ok">
+    This layout is derived from <code>core/config.py</code>, so it is identical on
+    every machine — this server now, or a rebuilt one later.
+  </div>
+  <div id="portInfo"></div>
+  <div class="row">
+    <button class="btn ghost" onclick="resyncPorts()">Re-sync ports with config</button>
+  </div>
+  <div id="portList" class="list"></div>
+</section>
+
+<section class="view" id="view-logs">
+  <div class="row">
+    <button class="btn ghost" onclick="loadLogs()">Reload</button>
+    <label class="chk"><input type="checkbox" id="autoLog"> auto-refresh</label>
+  </div>
+  <pre id="logBox" class="logs">-</pre>
+</section>
+
+</main>
+
+<div id="toast" class="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

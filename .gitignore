@@ -1,0 +1,7 @@
+venv/
+bin/
+data/registry.json
+data/engine.log
+data/wg/
+__pycache__/
+*.pyc
