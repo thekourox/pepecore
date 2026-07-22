@@ -126,11 +126,11 @@ class PanelClient:
             # Remove anything left over from the OLD architecture.
             cfg["inbounds"] = [
                 i for i in cfg["inbounds"]
-                if not i.get("tag", "").startswith(LEGACY_IN)
+                if not (i.get("tag") or "").startswith(LEGACY_IN)
             ]
             cfg["outbounds"] = [
                 o for o in cfg["outbounds"]
-                if not o.get("tag", "").startswith(LEGACY_OUT)
+                if not (o.get("tag") or "").startswith(LEGACY_OUT)
             ]
             cfg["routing"]["rules"] = [
                 r for r in cfg["routing"]["rules"]
@@ -143,7 +143,7 @@ class PanelClient:
             known: Dict[str, Dict] = {
                 h.get("inbound_tag"): h
                 for h in existing_hosts
-                if h.get("inbound_tag", "").startswith(IN_PREFIX)
+                if (h.get("inbound_tag") or "").startswith(IN_PREFIX)
             }
 
             new_host_payloads = []
@@ -250,7 +250,7 @@ class PanelClient:
             hosts = await self._get(client, "/api/hosts")
             n = 0
             for h in hosts:
-                if h.get("inbound_tag", "").startswith(IN_PREFIX):
+                if (h.get("inbound_tag") or "").startswith(IN_PREFIX):
                     h["enable"] = enabled
                     await client.put(
                         f"{self.host}/api/host/{h['id']}", headers=self._headers,
@@ -265,7 +265,7 @@ class PanelClient:
             hosts = await self._get(client, "/api/hosts")
             removed = 0
             for h in hosts:
-                if h.get("inbound_tag", "").startswith((IN_PREFIX,) + LEGACY_IN):
+                if (h.get("inbound_tag") or "").startswith((IN_PREFIX,) + LEGACY_IN):
                     await client.delete(
                         f"{self.host}/api/host/{h['id']}",
                         headers=self._headers, timeout=TIMEOUT,
@@ -279,11 +279,11 @@ class PanelClient:
 
             cfg["inbounds"] = [
                 i for i in cfg.get("inbounds", [])
-                if not i.get("tag", "").startswith(prefixes_in)
+                if not (i.get("tag") or "").startswith(prefixes_in)
             ]
             cfg["outbounds"] = [
                 o for o in cfg.get("outbounds", [])
-                if not o.get("tag", "").startswith(prefixes_out)
+                if not (o.get("tag") or "").startswith(prefixes_out)
             ]
             if "routing" in cfg and "rules" in cfg["routing"]:
                 cfg["routing"]["rules"] = [
