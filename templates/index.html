@@ -8,23 +8,9 @@
 </head>
 <body>
 
-<div id="loginOverlay" class="login-overlay" style="display:none;">
-  <div class="login-box">
-    <h2><span class="dot"></span> PepeCore Login</h2>
-    <div class="form col">
-      <input id="lUser" placeholder="Username">
-      <input id="lPass" type="password" placeholder="Password" onkeypress="if(event.key === 'Enter') doLogin()">
-      <button class="btn" onclick="doLogin()">Log in</button>
-    </div>
-  </div>
-</div>
-
 <header class="topbar">
   <div class="brand"><span class="dot"></span> PepeCore <span class="ver">v2</span></div>
-  <div style="display:flex; gap:15px; align-items:center;">
-    <div class="bind-state" id="bindState">—</div>
-    <button class="btn ghost sm" id="btnLogout" style="display:none;" onclick="doLogout()">Logout</button>
-  </div>
+  <div class="bind-state" id="bindState">—</div>
 </header>
 
 <nav class="tabs">
@@ -98,15 +84,20 @@
   <div class="step" id="step3">
     <div class="step-head"><span class="step-n">3</span>
       <div><b>Fill slots with countries</b>
-        <div class="sub">Each slot gets a different country and is pinned to it.
-        Fine-tune afterwards on the Slots tab.</div></div>
+        <div class="sub">Each slot gets a different exit — country and city —
+        and is pinned to it. Fine-tune afterwards on the Slots tab.</div></div>
       <span class="step-mark" id="mark3"></span>
     </div>
     <div class="step-body">
       <div class="form">
         <input id="fillCount" type="number" min="0" placeholder="0 = all empty" value="0">
+        <label class="chk"><input type="checkbox" id="fillPerCountry">
+          one city per country</label>
         <button class="btn" onclick="autofill()">Auto-fill &amp; pin</button>
       </div>
+      <p class="hint">Surfshark runs several cities in most countries (about 20
+      in the US alone), and each is a separate exit. Leave the box unticked to
+      use all ~140; tick it to collapse each country to one city (~65).</p>
     </div>
   </div>
 
@@ -139,6 +130,7 @@
       </div>
 
       <div class="row" id="panelOps" style="display:none">
+        <button class="btn sm ghost" onclick="relabelHosts()">Refresh host names</button>
         <button class="btn sm ghost" onclick="toggleHosts(true)">Enable hosts</button>
         <button class="btn sm ghost" onclick="toggleHosts(false)">Disable hosts</button>
         <button class="btn sm danger ghost" onclick="doUnbind()">Unbind everything</button>

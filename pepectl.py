@@ -70,14 +70,18 @@ def cmd_status(args):
             continue
         mark = f"{G}UP  {X}" if s["status"] == "up" else f"{R}DOWN{X}"
         locked = s.get("locked_country")
+        locked_city = s.get("locked_location")
         pin = "🔒" if locked else "  "
-        loc = s.get("location") or ""
-        where = (locked or s.get("country") or "?") + (f" / {loc}" if loc else "")
+        where = registry.slot_label(s) or "?"
+
         drift = ""
-        if locked and s.get("country") and \
-                locked.replace(" ", "").lower() != s["country"].replace(" ", "").lower():
-            drift = f" {R}⚠ serving {s['country']}{X}"
-        print(f"  [{s['index']:03d}] :{s['port']}  {mark} {pin} {where:<26} "
+        if locked and s.get("country"):
+            if registry.norm(locked) != registry.norm(s["country"]):
+                drift = f" {R}⚠ via {s['country']}/{s.get('location','')}{X}"
+            elif locked_city and registry.norm(locked_city) != registry.norm(s.get("location")):
+                drift = f" {Y}⚠ via {s.get('location')}{X}"
+
+        print(f"  [{s['index']:03d}] :{s['port']}  {mark} {pin} {where:<30} "
               f"{D}{s.get('endpoint', '')}{X}{drift}")
     print()
 
@@ -249,9 +253,9 @@ def cmd_slot_pin(args):
         sys.exit(1)
 
     s = res["slot"]
-    _ok(f"Slot {args.index} pinned to {res['locked_to']} "
-        f"({s.get('location') or s['endpoint']})")
-    print(f"  {D}Port :{s['port']} now serves {res['locked_to']} permanently.")
+    where = res["locked_to"] + (f" / {res['locked_location']}" if res.get("locked_location") else "")
+    _ok(f"Slot {args.index} pinned to {where}")
+    print(f"  {D}Port :{s['port']} now serves {where} permanently.")
     print(f"  Key rotations and server failures cannot change this.{X}")
 
 
@@ -293,23 +297,30 @@ def cmd_slot_fill(args):
         _err("Add a WireGuard key first: `pepectl.py key add --key <KEY>`")
         sys.exit(1)
 
-    # One server per country, for maximum geographic spread.
+    # One slot per distinct EXIT (country + city). Surfshark runs several
+    # cities in most countries, so deduping on country alone would throw
+    # away more than half the available locations.
     seen, pool = set(), []
     for s in servers:
-        if s["country"] not in seen:
-            seen.add(s["country"])
+        key = registry.norm(s["country"]) + "|" + registry.norm(s["location"])
+        if args.one_per_country:
+            key = registry.norm(s["country"])
+        if key not in seen:
+            seen.add(key)
             pool.append(s)
 
     n = min(len(empty), len(pool), args.count or len(empty))
     for i in range(n):
         slot, srv = empty[i], pool[i]
         # Pin as we go: each slot gets one country and keeps it.
-        registry.lock_country(slot["index"], srv["country"], srv["countryCode"])
+        registry.lock_country(slot["index"], srv["country"], srv["countryCode"],
+                              srv["location"])
         engine.assign_server(
             slot["index"], srv["endpoint"], srv["publicKey"],
-            srv["country"], srv["countryCode"], srv["location"],
+            srv["country"], srv["countryCode"], srv["location"], force=True,
         )
-        print(f"  [{slot['index']:03d}] :{slot['port']} → {srv['country']} {D}(pinned){X}")
+        where = f"{srv['country']}" + (f" / {srv['location']}" if srv['location'] else "")
+        print(f"  [{slot['index']:03d}] :{slot['port']} → {where} {D}(pinned){X}")
         time.sleep(0.5)
     _ok(f"Filled and pinned {n} slots. Panel not contacted.")
     print(f"  {D}Each port now serves one fixed country. "
@@ -360,11 +371,29 @@ def cmd_stop(args):
 
 def cmd_servers(args):
     servers = engine.fetch_clusters(force=True)
+    total = len(servers)
+    countries = len({s["country"] for s in servers})
+
     if args.country:
         servers = [s for s in servers if args.country.lower() in s["country"].lower()]
-    _head(f"Surfshark servers ({len(servers)})")
+    if args.city:
+        servers = [s for s in servers if args.city.lower() in s["location"].lower()]
+
+    _head(f"Surfshark exits — {total} across {countries} countries")
+    if args.country or args.city:
+        print(f"  {D}showing {len(servers)} matching{X}\n")
+
+    if args.by_country:
+        from collections import Counter
+        for country, n in sorted(Counter(s["country"] for s in servers).items()):
+            cities = sorted({s["location"] for s in servers if s["country"] == country})
+            print(f"  {country:<24} {n:>3} exit(s)   {D}{', '.join(cities)[:60]}{X}")
+        return
+
     for s in servers[:args.limit]:
         print(f"  {s['country']:<24} {s['location']:<20} {D}{s['endpoint']}{X}")
+    if len(servers) > args.limit:
+        print(f"  {D}… {len(servers) - args.limit} more (use --limit){X}")
 
 
 # ------------------------------------------------------------------ bind
@@ -394,29 +423,6 @@ def cmd_bind(args):
         _ok(f"Bound {result['slots_bound']} slots "
             f"({result['hosts_created']} new, {result['hosts_reused']} reused)")
         print(f"  {D}{result['note']}{X}")
-
-
-# ------------------------------------------------------------------ auth
-
-def cmd_auth_add(args):
-    registry.add_user(args.username, args.password)
-    _ok(f"User '{args.username}' added/updated.")
-
-def cmd_auth_list(args):
-    users = registry.get_users()
-    if not users:
-        _warn("No users configured. The web panel is currently unprotected.")
-        return
-    _head("Authentication")
-    for u in users:
-        print(f"  User: {G}{u['username']:<14}{X} Pass: {Y}{u['password']}{X}")
-    print()
-
-def cmd_auth_remove(args):
-    if registry.remove_user(args.username):
-        _ok(f"User '{args.username}' removed.")
-    else:
-        _err(f"User '{args.username}' not found.")
 
 
 # ------------------------------------------------------------------ main
@@ -479,6 +485,9 @@ def main():
 
     sf = sl.add_parser("fill", help="auto-assign servers to empty slots")
     sf.add_argument("--count", type=int, default=0)
+    sf.add_argument("--one-per-country", action="store_true",
+                    help="collapse each country to a single city (~65 exits "
+                         "instead of ~140)")
     sf.set_defaults(func=cmd_slot_fill)
 
     sm = sub.add_parser("slot").add_subparsers(dest="sub", required=True)
@@ -486,7 +495,7 @@ def main():
     sp = sm.add_parser("pin", help="pin a slot to a country permanently")
     sp.add_argument("index", type=int)
     sp.add_argument("--country", required=True)
-    sp.add_argument("--location", default="")
+    sp.add_argument("--location", default="", help="city, e.g. 'Los Angeles'")
     sp.set_defaults(func=cmd_slot_pin)
 
     sr = sm.add_parser("relocate", help="deliberately move a pinned slot elsewhere")
@@ -517,6 +526,9 @@ def main():
 
     sv = sub.add_parser("servers")
     sv.add_argument("--country", default="")
+    sv.add_argument("--city", default="")
+    sv.add_argument("--by-country", action="store_true",
+                    help="summarise exit counts per country")
     sv.add_argument("--limit", type=int, default=50)
     sv.set_defaults(func=cmd_servers)
 
@@ -528,20 +540,6 @@ def main():
     b.add_argument("--slot-count", type=int, default=15)
     b.add_argument("--node-ip", default="127.0.0.1")
     b.set_defaults(func=cmd_bind)
-
-    # auth
-    au = sub.add_parser("auth", help="manage web panel authentication").add_subparsers(dest="sub", required=True)
-    aua = au.add_parser("add", help="add or update a user")
-    aua.add_argument("username")
-    aua.add_argument("password")
-    aua.set_defaults(func=cmd_auth_add)
-    
-    aul = au.add_parser("list", help="list all users and passwords")
-    aul.set_defaults(func=cmd_auth_list)
-
-    aur = au.add_parser("remove", help="remove a user")
-    aur.add_argument("username")
-    aur.set_defaults(func=cmd_auth_remove)
 
     args = p.parse_args()
     args.func(args)

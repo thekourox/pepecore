@@ -15,9 +15,8 @@ import os
 import threading
 from typing import List, Optional
 
-import secrets
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -62,22 +61,6 @@ os.makedirs(os.path.join(ROOT, "templates"), exist_ok=True)
 app.mount("/static", StaticFiles(directory=os.path.join(ROOT, "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(ROOT, "templates"))
 
-SESSIONS = {}
-
-@app.middleware("http")
-async def auth_middleware(request: Request, call_next):
-    path = request.url.path
-    if path.startswith("/api/") and not path.startswith("/api/auth/"):
-        users = registry.get_users()
-        if users:
-            auth = request.headers.get("Authorization")
-            if not auth:
-                return JSONResponse(status_code=401, content={"detail": "Missing Authorization header"})
-            token = auth.replace("Bearer ", "").strip()
-            if token not in SESSIONS:
-                return JSONResponse(status_code=401, content={"detail": "Invalid or expired session token"})
-    return await call_next(request)
-
 
 # ======================================================================
 # Models
@@ -119,11 +102,6 @@ class PinRequest(BaseModel):
     identity_id: Optional[str] = None
 
 
-class AutoFillRequest(BaseModel):
-    count: Optional[int] = None
-    pin: bool = False
-
-
 class SlotsEnsure(BaseModel):
     count: int = Field(ge=1, le=256)
 
@@ -139,10 +117,10 @@ class ToggleRequest(BaseModel):
     enable: bool
 
 
-def _panel(x_panel_token: Optional[str], host: Optional[str]) -> PanelClient:
-    if not x_panel_token or not host:
-        raise HTTPException(401, "Missing panel credentials (X-Panel-Token + X-Panel-Host)")
-    return PanelClient(host, x_panel_token)
+def _panel(authorization: Optional[str], host: Optional[str]) -> PanelClient:
+    if not authorization or not host:
+        raise HTTPException(401, "Missing panel credentials (Authorization + X-Panel-Host)")
+    return PanelClient(host, authorization)
 
 
 # ======================================================================
@@ -153,40 +131,6 @@ def _panel(x_panel_token: Optional[str], host: Optional[str]) -> PanelClient:
 async def index(request: Request):
     return templates.TemplateResponse(request=request, name="index.html")
 
-# ======================================================================
-# AUTH ROUTES
-# ======================================================================
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-@app.post("/api/auth/login")
-def auth_login(req: LoginRequest):
-    if not registry.check_user(req.username, req.password):
-        raise HTTPException(401, "Invalid username or password")
-    token = secrets.token_hex(32)
-    SESSIONS[token] = req.username
-    return {"token": token}
-
-@app.get("/api/auth/me")
-def auth_me(authorization: str = Header(None)):
-    if not registry.get_users():
-        return {"username": "admin (unsecured)", "setup_required": True}
-    if not authorization:
-        raise HTTPException(401, "Not authenticated")
-    token = authorization.replace("Bearer ", "").strip()
-    if token not in SESSIONS:
-        raise HTTPException(401, "Invalid token")
-    return {"username": SESSIONS[token]}
-
-@app.post("/api/auth/logout")
-def auth_logout(authorization: str = Header(None)):
-    if authorization:
-        token = authorization.replace("Bearer ", "").strip()
-        SESSIONS.pop(token, None)
-    return {"logged_out": True}
-
 
 # ======================================================================
 # ENGINE ROUTES — none of these touch the panel
@@ -194,7 +138,9 @@ def auth_logout(authorization: str = Header(None)):
 
 @app.get("/api/engine/status")
 def engine_status(deep: bool = False):
+    from core.panel import slot_remark
     snap = engine.health_snapshot(deep=deep)
+    snap["slots"] = [{**s, "remark": slot_remark(s)} for s in snap["slots"]]
     reg = registry.load()
     return {
         **snap,
@@ -210,7 +156,8 @@ def engine_status(deep: bool = False):
 
 @app.get("/api/engine/slots")
 def list_slots():
-    return registry.load()["slots"]
+    from core.panel import slot_remark
+    return [{**s, "remark": slot_remark(s)} for s in registry.load()["slots"]]
 
 
 @app.post("/api/engine/slots/ensure")
@@ -329,17 +276,26 @@ def autofill_slots(req: AutoFillRequest):
     except Exception as e:      # noqa: BLE001
         raise HTTPException(502, f"Surfshark API unreachable: {e}")
 
-    # Countries already pinned elsewhere are skipped, so autofill never
-    # produces two slots serving the same country.
-    taken = {
-        (s.get("locked_country") or "").replace(" ", "").lower()
-        for s in reg["slots"] if s.get("locked_country")
-    }
+    # An exit is identified by country AND city — "United States / Los Angeles"
+    # is a different exit from "United States / New York". Deduping on country
+    # alone was collapsing ~140 available locations down to ~65.
+    def exit_key(country: str, location: str) -> str:
+        return registry.norm(country) + "|" + registry.norm(location)
+
+    if req.one_per_country:
+        taken = {registry.norm(s["locked_country"]) for s in reg["slots"]
+                 if s.get("locked_country")}
+        key_of = lambda srv: registry.norm(srv["country"])
+    else:
+        taken = {exit_key(s.get("locked_country") or "", s.get("locked_location") or "")
+                 for s in reg["slots"] if s.get("locked_country")}
+        key_of = lambda srv: exit_key(srv["country"], srv["location"])
+
     pool, seen = [], set()
     for s in servers:
-        key = s["country"].replace(" ", "").lower()
-        if key not in seen and key not in taken:
-            seen.add(key)
+        k = key_of(s)
+        if k not in seen and k not in taken:
+            seen.add(k)
             pool.append(s)
 
     n = min(len(empty), len(pool), req.count or len(empty))
@@ -348,18 +304,25 @@ def autofill_slots(req: AutoFillRequest):
         slot, srv = empty[i], pool[i]
         try:
             if req.pin:
-                registry.lock_country(slot["index"], srv["country"], srv["countryCode"])
+                registry.lock_country(slot["index"], srv["country"],
+                                      srv["countryCode"], srv["location"])
             engine.assign_server(
                 slot["index"], srv["endpoint"], srv["publicKey"],
                 srv["country"], srv["countryCode"], srv["location"], force=True,
             )
             filled.append({"slot": slot["index"], "port": slot["port"],
-                           "country": srv["country"]})
+                           "country": srv["country"], "location": srv["location"]})
         except Exception as e:      # noqa: BLE001
             log.warning("autofill slot %s failed: %s", slot["index"], e)
         time.sleep(0.4)
 
-    return {"filled": len(filled), "slots": filled, "panel_touched": False}
+    return {
+        "filled": len(filled),
+        "slots": filled,
+        "available_exits": len(pool),
+        "empty_slots": len(empty),
+        "panel_touched": False,
+    }
 
 
 @app.get("/api/engine/keyload")
@@ -469,10 +432,10 @@ def engine_logs(lines: int = 300):
 # ======================================================================
 
 @app.get("/api/panel/cores")
-async def panel_cores(x_panel_token: str = Header(None),
+async def panel_cores(authorization: str = Header(None),
                       x_panel_host: str = Header(None)):
     try:
-        return await _panel(x_panel_token, x_panel_host).cores()
+        return await _panel(authorization, x_panel_host).cores()
     except HTTPException:
         raise
     except Exception as e:      # noqa: BLE001
@@ -480,10 +443,10 @@ async def panel_cores(x_panel_token: str = Header(None),
 
 
 @app.get("/api/panel/hosts")
-async def panel_hosts(x_panel_token: str = Header(None),
+async def panel_hosts(authorization: str = Header(None),
                       x_panel_host: str = Header(None)):
     try:
-        return await _panel(x_panel_token, x_panel_host).hosts()
+        return await _panel(authorization, x_panel_host).hosts()
     except HTTPException:
         raise
     except Exception as e:      # noqa: BLE001
@@ -492,7 +455,7 @@ async def panel_hosts(x_panel_token: str = Header(None),
 
 @app.post("/api/panel/bind")
 async def panel_bind(req: BindRequest,
-                     x_panel_token: str = Header(None),
+                     authorization: str = Header(None),
                      x_panel_host: str = Header(None)):
     """
     One-time wiring of slot ports into the core config.
@@ -501,7 +464,7 @@ async def panel_bind(req: BindRequest,
     countries indefinitely without ever calling it again.
     """
     try:
-        return await _panel(x_panel_token, x_panel_host).bind(
+        return await _panel(authorization, x_panel_host).bind(
             req.core_id, req.template_host_id, req.slot_count, req.node_ip
         )
     except HTTPException:
@@ -510,12 +473,29 @@ async def panel_bind(req: BindRequest,
         raise HTTPException(500, f"Bind failed: {e}")
 
 
+@app.post("/api/panel/relabel")
+async def panel_relabel(authorization: str = Header(None),
+                        x_panel_host: str = Header(None)):
+    """
+    Refresh host names to match current pins, without a full bind.
+
+    Use after relocating slots: the label a user sees follows the slot's
+    country, and UUIDs are left alone so subscriptions keep working.
+    """
+    try:
+        return await _panel(authorization, x_panel_host).relabel_hosts()
+    except HTTPException:
+        raise
+    except Exception as e:      # noqa: BLE001
+        raise HTTPException(500, str(e))
+
+
 @app.post("/api/panel/toggle")
 async def panel_toggle(req: ToggleRequest,
-                       x_panel_token: str = Header(None),
+                       authorization: str = Header(None),
                        x_panel_host: str = Header(None)):
     try:
-        return await _panel(x_panel_token, x_panel_host).set_enabled(req.enable)
+        return await _panel(authorization, x_panel_host).set_enabled(req.enable)
     except HTTPException:
         raise
     except Exception as e:      # noqa: BLE001
@@ -524,10 +504,10 @@ async def panel_toggle(req: ToggleRequest,
 
 @app.delete("/api/panel/bind/{core_id}")
 async def panel_unbind(core_id: str,
-                       x_panel_token: str = Header(None),
+                       authorization: str = Header(None),
                        x_panel_host: str = Header(None)):
     try:
-        return await _panel(x_panel_token, x_panel_host).unbind(core_id)
+        return await _panel(authorization, x_panel_host).unbind(core_id)
     except HTTPException:
         raise
     except Exception as e:      # noqa: BLE001

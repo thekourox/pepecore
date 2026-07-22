@@ -55,6 +55,44 @@ LEGACY_OUT = ("SurfOut-", "B-Out-")
 BASE_INBOUND_PORT = config.INBOUND_BASE_PORT
 
 
+def flag_emoji(country_code: str) -> str:
+    """
+    Two-letter country code -> regional indicator pair, e.g. 'DE' -> 🇩🇪.
+    Returns "" for anything that isn't a plausible code.
+    """
+    cc = (country_code or "").strip().upper()
+    if len(cc) != 2 or not cc.isalpha():
+        return ""
+    return chr(ord(cc[0]) + 127397) + chr(ord(cc[1]) + 127397)
+
+
+def host_remark(country: str, location: str = "", country_code: str = "") -> str:
+    """
+    Build the host label users see in their subscription:
+
+        Germany - Berlin 🇩🇪
+        Japan 🇯🇵                (when the city adds nothing)
+
+    The city is omitted when it just repeats the country name, which is how
+    Surfshark lists single-city countries.
+    """
+    country = (country or "").strip()
+    location = (location or "").strip()
+    flag = flag_emoji(country_code)
+
+    part = f" - {location}" if location and location != country else ""
+    return f"{country}{part} {flag}".strip()
+
+
+def slot_remark(slot: Dict) -> str:
+    """The remark for a slot, preferring its pin over its current server."""
+    return host_remark(
+        slot.get("locked_country") or slot.get("country") or "",
+        slot.get("locked_location") or slot.get("location") or "",
+        slot.get("locked_country_code") or slot.get("country_code") or "",
+    ) or f"Slot {slot['index']:03d}"
+
+
 class PanelClient:
     def __init__(self, host: str, token: str):
         self.host = host.rstrip("/")
@@ -126,11 +164,11 @@ class PanelClient:
             # Remove anything left over from the OLD architecture.
             cfg["inbounds"] = [
                 i for i in cfg["inbounds"]
-                if not (i.get("tag") or "").startswith(LEGACY_IN)
+                if not i.get("tag", "").startswith(LEGACY_IN)
             ]
             cfg["outbounds"] = [
                 o for o in cfg["outbounds"]
-                if not (o.get("tag") or "").startswith(LEGACY_OUT)
+                if not o.get("tag", "").startswith(LEGACY_OUT)
             ]
             cfg["routing"]["rules"] = [
                 r for r in cfg["routing"]["rules"]
@@ -143,10 +181,11 @@ class PanelClient:
             known: Dict[str, Dict] = {
                 h.get("inbound_tag"): h
                 for h in existing_hosts
-                if (h.get("inbound_tag") or "").startswith(IN_PREFIX)
+                if h.get("inbound_tag", "").startswith(IN_PREFIX)
             }
 
             new_host_payloads = []
+            host_updates = []
 
             for slot in slots:
                 in_tag = slot["inbound_tag"]
@@ -203,10 +242,21 @@ class PanelClient:
                     for k in ("id", "created_at", "updated_at"):
                         payload.pop(k, None)
                     payload["uuid"] = slot_uuid
-                    payload["remark"] = f"Slot {slot['index']:03d}"
+                    payload["remark"] = slot_remark(slot)
                     payload["inbound_tag"] = in_tag
                     payload["port"] = inbound_port
                     new_host_payloads.append(payload)
+                else:
+                    # Existing host: refresh the label if the slot has since
+                    # been pinned or relocated. The UUID is untouched, so
+                    # current subscriptions keep working — only the name the
+                    # user sees changes.
+                    want = slot_remark(slot)
+                    if prior.get("remark") != want or prior.get("port") != inbound_port:
+                        updated = copy.deepcopy(prior)
+                        updated["remark"] = want
+                        updated["port"] = inbound_port
+                        host_updates.append(updated)
 
             # Push config first so the tags exist before hosts reference them.
             core_data["config"] = cfg
@@ -228,6 +278,17 @@ class PanelClient:
                 else:
                     log.warning("Host create failed: %s", hr.text)
 
+            relabelled = 0
+            for payload in host_updates:
+                ur = await client.put(
+                    f"{self.host}/api/host/{payload['id']}", headers=self._headers,
+                    json=payload, timeout=TIMEOUT,
+                )
+                if ur.is_success:
+                    relabelled += 1
+                else:
+                    log.warning("Host relabel failed: %s", ur.text)
+
             # Single restart at the end.
             await client.put(
                 f"{self.host}/api/core/{core_id}?restart_nodes=true",
@@ -235,14 +296,54 @@ class PanelClient:
             )
 
         registry.mark_bound(core_id, self.host, slot_count)
-        log.info("Bound %s slots to core %s (%s new hosts)", slot_count, core_id, created)
+        log.info("Bound %s slots to core %s (%s new, %s relabelled)",
+                 slot_count, core_id, created, relabelled)
 
         return {
             "slots_bound": slot_count,
             "hosts_created": created,
+            "hosts_relabelled": relabelled,
             "hosts_reused": slot_count - created,
             "note": "Ports are now fixed. Key and server changes no longer touch the panel.",
         }
+
+    async def relabel_hosts(self) -> Dict:
+        """
+        Bring host labels back in line with the slots' pinned countries.
+
+        Cheaper than a full bind and touches nothing else: no config push,
+        no restart, no UUID changes.
+        """
+        slots_by_tag = {s["inbound_tag"]: s for s in registry.load()["slots"]}
+
+        async with httpx.AsyncClient() as client:
+            hosts = await self._get(client, "/api/hosts")
+            updated, unchanged = 0, 0
+
+            for h in hosts:
+                tag = h.get("inbound_tag", "")
+                if not tag.startswith(IN_PREFIX):
+                    continue
+                slot = slots_by_tag.get(tag)
+                if not slot:
+                    continue
+
+                want = slot_remark(slot)
+                if h.get("remark") == want:
+                    unchanged += 1
+                    continue
+
+                h["remark"] = want
+                r = await client.put(
+                    f"{self.host}/api/host/{h['id']}", headers=self._headers,
+                    json=h, timeout=TIMEOUT,
+                )
+                if r.is_success:
+                    updated += 1
+                else:
+                    log.warning("Relabel failed for %s: %s", tag, r.text)
+
+        return {"relabelled": updated, "already_correct": unchanged}
 
     async def set_enabled(self, enabled: bool) -> Dict:
         """Enable/disable our hosts without deleting anything."""
@@ -250,7 +351,7 @@ class PanelClient:
             hosts = await self._get(client, "/api/hosts")
             n = 0
             for h in hosts:
-                if (h.get("inbound_tag") or "").startswith(IN_PREFIX):
+                if h.get("inbound_tag", "").startswith(IN_PREFIX):
                     h["enable"] = enabled
                     await client.put(
                         f"{self.host}/api/host/{h['id']}", headers=self._headers,
@@ -265,7 +366,7 @@ class PanelClient:
             hosts = await self._get(client, "/api/hosts")
             removed = 0
             for h in hosts:
-                if (h.get("inbound_tag") or "").startswith((IN_PREFIX,) + LEGACY_IN):
+                if h.get("inbound_tag", "").startswith((IN_PREFIX,) + LEGACY_IN):
                     await client.delete(
                         f"{self.host}/api/host/{h['id']}",
                         headers=self._headers, timeout=TIMEOUT,
@@ -279,11 +380,11 @@ class PanelClient:
 
             cfg["inbounds"] = [
                 i for i in cfg.get("inbounds", [])
-                if not (i.get("tag") or "").startswith(prefixes_in)
+                if not i.get("tag", "").startswith(prefixes_in)
             ]
             cfg["outbounds"] = [
                 o for o in cfg.get("outbounds", [])
-                if not (o.get("tag") or "").startswith(prefixes_out)
+                if not o.get("tag", "").startswith(prefixes_out)
             ]
             if "routing" in cfg and "rules" in cfg["routing"]:
                 cfg["routing"]["rules"] = [

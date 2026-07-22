@@ -450,21 +450,32 @@ def pin_slot(slot_index: int, country: str, location: str = "",
     somewhere else.
     """
     matches = [c for c in fetch_clusters()
-               if c["country"].replace(" ", "").lower() == country.replace(" ", "").lower()]
-    if location:
-        narrowed = [c for c in matches if location.lower() in c["location"].lower()]
-        matches = narrowed or matches
+               if registry.norm(c["country"]) == registry.norm(country)]
     if not matches:
         raise ValueError(f"No Surfshark servers found for country '{country}'")
 
+    if location:
+        exact = [c for c in matches if registry.norm(c["location"]) == registry.norm(location)]
+        loose = [c for c in matches if registry.norm(location) in registry.norm(c["location"])]
+        narrowed = exact or loose
+        if not narrowed:
+            cities = sorted({c["location"] for c in matches if c["location"]})
+            raise ValueError(
+                f"No '{location}' server in {country}. Available: {', '.join(cities) or 'none listed'}"
+            )
+        matches = narrowed
+
     pick = matches[0]
-    registry.lock_country(slot_index, pick["country"], pick["countryCode"])
+    # Pin the city too, so failover keeps the slot in the same place.
+    registry.lock_country(slot_index, pick["country"], pick["countryCode"],
+                          pick["location"])
     result = assign_server(
         slot_index, pick["endpoint"], pick["publicKey"],
         pick["country"], pick["countryCode"], pick["location"],
         identity_id=identity_id,
     )
     result["locked_to"] = pick["country"]
+    result["locked_location"] = pick["location"]
     return result
 
 
@@ -633,23 +644,33 @@ def capacity_report(target_slots: Optional[int] = None) -> Dict:
     }
 
 
-def alternatives_for(country: str, avoid_endpoint: str = "") -> List[Dict]:
+def alternatives_for(country: str, avoid_endpoint: str = "",
+                     location: str = "") -> List[Dict]:
     """
-    Other servers in the SAME country. The watchdog uses this for failover,
-    which is why a dead server never changes a slot's exit country — it can
-    only ever be replaced by another server flying the same flag.
+    Other servers in the same country, with same-city ones first.
+
+    Surfshark runs multiple cities per country — roughly 20 in the US — and
+    each is a separate exit with its own latency. When a slot pinned to
+    "United States / Los Angeles" loses its server, another Los Angeles
+    server is a far better replacement than a New York one, even though
+    both satisfy the country pin.
     """
     try:
         clusters = fetch_clusters()
     except Exception:       # noqa: BLE001
         return []
-    norm = (country or "").replace(" ", "").replace("-", "").lower()
-    if not norm:
+    if not registry.norm(country):
         return []
+
     same = [c for c in clusters
-            if c["country"].replace(" ", "").replace("-", "").lower() == norm]
+            if registry.norm(c["country"]) == registry.norm(country)]
     if avoid_endpoint:
         same = [c for c in same if c["endpoint"] not in avoid_endpoint]
+
+    if location:
+        here = [c for c in same if registry.norm(c["location"]) == registry.norm(location)]
+        elsewhere = [c for c in same if registry.norm(c["location"]) != registry.norm(location)]
+        return here + elsewhere
     return same
 
 
@@ -694,22 +715,28 @@ def _norm(s: str) -> str:
     return (s or "").replace(" ", "").replace("-", "").lower()
 
 
-def failover_candidates(country: str, avoid_endpoint: str = "") -> List[Tuple[Dict, str]]:
+def failover_candidates(country: str, avoid_endpoint: str = "",
+                        location: str = "") -> List[Tuple[Dict, str]]:
     """
     Servers to try when a slot is down, in order of preference:
 
-        1. same country          -> exit country unchanged (the normal case)
-        2. neighbouring country  -> only if the whole country is unreachable
-        3. anything alive        -> last resort, better than a dead slot
+        1. same city             -> user sees no change at all
+        2. same country          -> different city, same flag
+        3. neighbouring country  -> only if the whole country is unreachable
+        4. anything alive        -> last resort, better than a dead slot
 
     Returns (server, tier) pairs so the caller can log and flag drift.
-    A slot that falls back to tier 2 or 3 keeps its pin, so as soon as its
-    real country comes back the watchdog pulls it home again.
+    A slot that falls back keeps its pin, so as soon as its real city or
+    country returns the watchdog pulls it home again.
     """
     out: List[Tuple[Dict, str]] = []
 
-    same = alternatives_for(country, avoid_endpoint)
-    out += [(c, "same-country") for c in same]
+    same = alternatives_for(country, avoid_endpoint, location)
+    for c in same:
+        if location and registry.norm(c["location"]) == registry.norm(location):
+            out.append((c, "same-city"))
+        else:
+            out.append((c, "same-country"))
 
     try:
         clusters = fetch_clusters()
@@ -732,3 +759,8 @@ def failover_candidates(country: str, avoid_endpoint: str = "") -> List[Tuple[Di
 def slot_country(slot: Dict) -> str:
     """The country a slot must serve: its pin if it has one, else current."""
     return slot.get("locked_country") or slot.get("country") or ""
+
+
+def slot_location(slot: Dict) -> str:
+    """The city a slot should prefer: its pin if it has one, else current."""
+    return slot.get("locked_location") or slot.get("location") or ""

@@ -90,7 +90,9 @@ class Watchdog:
             # The pin is never cleared, so a slot parked on a neighbour gets
             # pulled home automatically once its own country recovers.
             target_country = engine.slot_country(slot)
-            candidates = engine.failover_candidates(target_country, slot.get("endpoint", ""))
+            target_location = engine.slot_location(slot)
+            candidates = engine.failover_candidates(
+                target_country, slot.get("endpoint", ""), target_location)
 
             if candidates:
                 import random
@@ -98,14 +100,14 @@ class Watchdog:
                 pool = [c for c, t in candidates if t == tier]
                 pick = random.choice(pool)
 
-                if tier != "same-country":
+                if tier in ("same-city", "same-country"):
+                    log.info("slot %s down x%s -> %s / %s (%s)",
+                             idx, streak, pick["country"], pick["location"], tier)
+                else:
                     log.warning(
                         "slot %s: no working %s server, falling back to %s (%s)",
                         idx, target_country, pick["country"], tier,
                     )
-                else:
-                    log.info("slot %s down x%s -> swapping to %s (%s)",
-                             idx, streak, pick["endpoint"], pick["country"])
 
                 engine.assign_server(
                     idx, pick["endpoint"], pick["publicKey"],
@@ -140,20 +142,29 @@ class Watchdog:
         so it will not flap between a dead home and a working neighbour.
         """
         pinned = slot.get("locked_country")
+        pinned_city = slot.get("locked_location")
         current = slot.get("country")
+        current_city = slot.get("location")
         if not pinned or not current:
             return False
-        if engine._norm(pinned) == engine._norm(current):
-            return False        # already home
 
-        home = engine.alternatives_for(pinned)
+        home_country = registry.norm(pinned) == registry.norm(current)
+        home_city = (not pinned_city) or registry.norm(pinned_city) == registry.norm(current_city)
+        if home_country and home_city:
+            return False        # already exactly where it belongs
+
+        # Only same-city servers count as "home" when a city is pinned.
+        home = engine.alternatives_for(pinned, "", pinned_city or "")
+        if pinned_city:
+            home = [c for c in home
+                    if registry.norm(c["location"]) == registry.norm(pinned_city)]
         if not home:
-            return False        # home country still has nothing
+            return False        # home is still unreachable
 
         import random
         pick = random.choice(home)
-        log.info("slot %s: %s is reachable again, bringing it home from %s",
-                 slot["index"], pinned, current)
+        log.info("slot %s: %s is reachable again, bringing it home from %s / %s",
+                 slot["index"], registry.slot_label(slot), current, current_city)
         engine.assign_server(
             slot["index"], pick["endpoint"], pick["publicKey"],
             country=pick["country"], country_code=pick["countryCode"],
@@ -167,8 +178,13 @@ class Watchdog:
         n = 0
         for s in registry.occupied_slots():
             pinned, current = s.get("locked_country"), s.get("country")
-            if pinned and current and engine._norm(pinned) != engine._norm(current):
+            if not pinned or not current:
+                continue
+            if registry.norm(pinned) != registry.norm(current):
                 n += 1
+            elif s.get("locked_location") and \
+                    registry.norm(s["locked_location"]) != registry.norm(s.get("location")):
+                n += 1          # right country, wrong city
         return n
 
 

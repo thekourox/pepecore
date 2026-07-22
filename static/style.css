@@ -125,8 +125,4 @@ textarea{background:#0e141b;border:1px solid var(--line);color:var(--txt);
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical}
 textarea:focus{outline:0;border-color:var(--acc)}
 
-.login-overlay { position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(11,15,20,0.95);
-  display:flex; align-items:center; justify-content:center; z-index:9999; }
-.login-box { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:30px; width:100%; max-width:320px; box-shadow:0 10px 30px rgba(0,0,0,0.5); }
-.login-box h2 { margin-top:0; display:flex; align-items:center; }
-.login-box h2 .dot { display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--acc); margin-right:10px; box-shadow:0 0 10px var(--acc); }
+.remark{font-size:11px;color:var(--acc);margin-top:2px;opacity:.75}

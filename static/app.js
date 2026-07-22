@@ -10,83 +10,17 @@ function toast(msg, bad) {
 
 async function api(path, method = 'GET', body = null, panelAuth = false) {
   const opt = { method, headers: { 'Content-Type': 'application/json' } };
-  
-  const token = localStorage.getItem('pepe_token');
-  if (token) opt.headers['Authorization'] = 'Bearer ' + token;
-
   if (panelAuth) {
     const h = $('pHost').value.trim(), t = $('pToken').value.trim();
     if (!h || !t) throw new Error('Enter the panel URL and token first');
+    opt.headers['Authorization'] = t;
     opt.headers['X-Panel-Host'] = h;
-    // Overwrite Authorization if panelAuth is true, as per original logic? 
-    // Wait, original logic sent the panel token in Authorization header.
-    // We now have our own Authorization header. Let's send the panel token as X-Panel-Token.
-    // Actually, backend app.py still reads `authorization` from Header for panel API.
-    // This is a conflict! Let's just pass panel token in X-Panel-Token instead in frontend, and update backend?
-    // OR we can pass it as Authorization and the auth_middleware will just pass it through because it doesn't check /api/panel/?
-    // Wait, auth_middleware DOES check /api/panel/.
-    opt.headers['X-Panel-Token'] = t;
   }
   if (body) opt.body = JSON.stringify(body);
   const r = await fetch(path, opt);
-  if (r.status === 401 && !path.startsWith('/api/auth/')) {
-      showLogin();
-      throw new Error("Authentication required");
-  }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.detail || r.statusText);
   return data;
-}
-
-function showLogin() {
-  $('loginOverlay').style.display = 'flex';
-  const btn = $('btnLogout');
-  if (btn) btn.style.display = 'none';
-}
-
-async function doLogin() {
-  const u = $('lUser').value.trim();
-  const p = $('lPass').value.trim();
-  if (!u || !p) return toast('Enter username and password', true);
-  try {
-    const r = await fetch('/api/auth/login', {
-      method: 'POST', 
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({username: u, password: p})
-    });
-    if (!r.ok) throw new Error("Invalid username or password");
-    const d = await r.json();
-    localStorage.setItem('pepe_token', d.token);
-    $('loginOverlay').style.display = 'none';
-    const btn = $('btnLogout');
-    if (btn) btn.style.display = 'block';
-    
-    // Once logged in, we must call checkAuthOnLoad so everything initializes properly
-    checkAuthOnLoad();
-  } catch (e) { toast(e.message, true); }
-}
-
-async function doLogout() {
-  await fetch('/api/auth/logout', {
-    method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('pepe_token') }
-  });
-  localStorage.removeItem('pepe_token');
-  showLogin();
-}
-
-async function checkAuthOnLoad() {
-  try {
-    const r = await api('/api/auth/me');
-    $('loginOverlay').style.display = 'none';
-    if (!r.setup_required) {
-       const btn = $('btnLogout');
-       if (btn) btn.style.display = 'block';
-    }
-    refresh();
-  } catch (e) {
-     // showLogin handled by api()
-  }
 }
 
 async function act(path, method, body) {
@@ -358,11 +292,22 @@ async function ensureSlots() {
 
 async function autofill() {
   const n = +($('fillCount') ? $('fillCount').value : 0) || 0;
-  if (!confirm('Fill empty slots with one country each and pin them?')) return;
+  const perCountry = $('fillPerCountry') ? $('fillPerCountry').checked : false;
+  if (!confirm(perCountry
+      ? 'Fill empty slots with one city per country?'
+      : 'Fill empty slots, using every distinct city as its own location?')) return;
   try {
     toast('Filling slots, this takes a moment...');
-    const d = await api('/api/engine/slots/autofill', 'POST', { count: n, pin: true });
-    toast(d.message || ('Filled and pinned ' + d.filled + ' slots'));
+    const d = await api('/api/engine/slots/autofill', 'POST',
+      { count: n, pin: true, one_per_country: perCountry });
+    if (d.message) { toast(d.message); }
+    else {
+      let msg = 'Filled and pinned ' + d.filled + ' slots';
+      if (d.available_exits > d.filled)
+        msg += ' \u2014 ' + (d.available_exits - d.filled) +
+               ' more exits available, reserve more slots to use them';
+      toast(msg);
+    }
     refresh();
   } catch (e) { toast(e.message, true); }
 }
@@ -371,7 +316,8 @@ async function loadServers(force) {
   if (SERVERS.length && !force) return renderSlots();
   try {
     SERVERS = await api('/api/engine/surfshark/servers' + (force ? '?force=true' : ''));
-    toast(SERVERS.length + ' Surfshark servers loaded');
+    const countries = new Set(SERVERS.map(s => s.country)).size;
+    toast(SERVERS.length + ' exits across ' + countries + ' countries loaded');
     renderSlots();
   } catch (e) { toast(e.message, true); }
 }
@@ -393,23 +339,29 @@ function renderSlots() {
 
   const opts = SERVERS.map((s, i) =>
     '<option value="' + i + '">' + s.country +
-    (s.location ? ' / ' + s.location : '') + '</option>').join('');
+    (s.location ? ' \u00b7 ' + s.location : '') + '</option>').join('');
 
   $('slotList').innerHTML = rows.map(s => {
     const cls = s.status === 'up' ? 'up' : s.status === 'down' ? 'down' : 'idle';
     const pinned = s.locked_country;
-    const drift = pinned && s.country && norm(pinned) !== norm(s.country);
+    const pinnedCity = s.locked_location;
+    const countryDrift = pinned && s.country && norm(pinned) !== norm(s.country);
+    const cityDrift = !countryDrift && pinnedCity && s.location &&
+                      norm(pinnedCity) !== norm(s.location);
     const where = pinned
-      ? '\uD83D\uDD12 ' + pinned + (s.location ? ' / ' + s.location : '')
+      ? '\uD83D\uDD12 ' + pinned + (pinnedCity ? ' / ' + pinnedCity : '')
       : (s.country ? s.country + (s.location ? ' / ' + s.location : '') : '\u2014 empty \u2014');
-    const driftTag = drift
-      ? '<span class="drift">temporarily via ' + s.country + '</span>' : '';
+    const driftTag = countryDrift
+      ? '<span class="drift">temporarily via ' + s.country +
+        (s.location ? ' / ' + s.location : '') + '</span>'
+      : (cityDrift ? '<span class="drift">temporarily via ' + s.location + '</span>' : '');
 
     return '<div class="item ' + cls + '">' +
       '<div><b>Slot ' + String(s.index).padStart(3, '0') + '</b>' +
         '<span class="port">:' + s.port + '</span>' +
         '<span class="badge ' + cls + '">' + s.status + '</span>' + driftTag +
-        '<div class="sub">' + where + (s.endpoint ? ' \u00b7 ' + s.endpoint : '') + '</div></div>' +
+        '<div class="sub">' + where + (s.endpoint ? ' \u00b7 ' + s.endpoint : '') + '</div>' +
+        (s.remark ? '<div class="remark">shows as: ' + s.remark + '</div>' : '') + '</div>' +
       '<div class="acts">' +
         '<select class="mini" id="srv-' + s.index + '">' + opts + '</select>' +
         '<button class="btn sm" onclick="pinSlot(' + s.index + ',' + (pinned ? 'true' : 'false') + ')">' +
@@ -428,9 +380,10 @@ async function pinSlot(idx, alreadyPinned) {
   const s = SERVERS[+sel.value];
   if (!s) return toast('Pick a country', true);
 
+  const dest = s.country + (s.location ? ' / ' + s.location : '');
   if (alreadyPinned && !confirm(
-      'Move slot ' + idx + ' to ' + s.country + '?\n\n' +
-      'Everyone using this slot\'s inbound will start exiting from ' + s.country +
+      'Move slot ' + idx + ' to ' + dest + '?\n\n' +
+      'Everyone using this slot\'s inbound will start exiting from ' + dest +
       ', with no change on their side.')) return;
 
   const path = alreadyPinned
@@ -438,7 +391,8 @@ async function pinSlot(idx, alreadyPinned) {
     : '/api/engine/slots/' + idx + '/pin';
   try {
     await api(path, 'POST', { country: s.country, location: s.location });
-    toast('Slot ' + idx + ' pinned to ' + s.country + ' \u2014 port unchanged, panel untouched');
+    toast('Slot ' + idx + ' pinned to ' + s.country +
+          (s.location ? ' / ' + s.location : '') + ' \u2014 port unchanged, panel untouched');
     refresh();
   } catch (e) { toast(e.message, true); }
 }
@@ -513,6 +467,15 @@ async function doBind() {
   } catch (e) { toast(e.message, true); }
 }
 
+async function relabelHosts() {
+  if (!confirm('Refresh host names in the panel to match the current pins?\n\n' +
+               'UUIDs are untouched, so subscriptions keep working.')) return;
+  try {
+    const d = await api('/api/panel/relabel', 'POST', null, true);
+    toast(d.relabelled + ' host(s) renamed, ' + d.already_correct + ' already correct');
+  } catch (e) { toast(e.message, true); }
+}
+
 async function toggleHosts(enable) {
   try {
     const d = await api('/api/panel/toggle', 'POST', { enable: enable }, true);
@@ -547,5 +510,5 @@ document.addEventListener('change', e => {
   }
 });
 
-checkAuthOnLoad();
-setInterval(() => { if (!document.hidden && $('loginOverlay').style.display === 'none') refresh(); }, 20000);
+refresh();
+setInterval(() => { if (!document.hidden) refresh(); }, 20000);

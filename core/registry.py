@@ -56,7 +56,6 @@ def _default_registry() -> Dict[str, Any]:
         # Identity pool: the WireGuard credentials. Swapping these is the
         # operation that used to require a full re-inject.
         "identities": [],          # [{"id","private_key","address","label"}]
-        "users": [],               # [{"username","password"}]
         # Slots: the permanent port assignments.
         "slots": [],               # see _blank_slot()
         # Panel binding is recorded for reference only. The engine never
@@ -86,6 +85,7 @@ def _blank_slot(index: int, base_port: int = 0) -> Dict[str, Any]:
         # silently relocates every user on this slot's inbound.
         "locked_country": None,
         "locked_country_code": None,
+        "locked_location": None,
         # --- everything below is hot-swappable within the locked country ---
         "identity_id": None,
         "endpoint": None,
@@ -233,7 +233,8 @@ def update_slot(index: int, **fields) -> Optional[Dict[str, Any]]:
                 # Guard the immutable contract fields.
                 for immutable in ("index", "port", "inbound_port",
                                   "outbound_tag", "inbound_tag",
-                                  "locked_country", "locked_country_code"):
+                                  "locked_country", "locked_country_code",
+                                  "locked_location"):
                     fields.pop(immutable, None)
                 s.update(fields)
                 save(reg)
@@ -241,10 +242,16 @@ def update_slot(index: int, **fields) -> Optional[Dict[str, Any]]:
         return None
 
 
-def lock_country(index: int, country: str, country_code: str = "") -> Optional[Dict[str, Any]]:
+def lock_country(index: int, country: str, country_code: str = "",
+                 location: str = "") -> Optional[Dict[str, Any]]:
     """
-    Pin a slot to a country. From here on the engine and the watchdog will
-    refuse to place any other country's server on this port.
+    Pin a slot to a country and, when given, a specific city.
+
+    Surfshark lists several cities per country (about 20 in the US alone) and
+    each is a distinct exit. Pinning to "United States" alone would let a
+    failover move a slot from Los Angeles to New York — same flag, very
+    different latency for the user. Recording the location keeps the slot
+    where it was put.
     """
     with _lock:
         reg = load()
@@ -252,6 +259,7 @@ def lock_country(index: int, country: str, country_code: str = "") -> Optional[D
             if s["index"] == index:
                 s["locked_country"] = country
                 s["locked_country_code"] = country_code
+                s["locked_location"] = location or None
                 save(reg)
                 return s
         return None
@@ -265,9 +273,15 @@ def unlock_country(index: int) -> Optional[Dict[str, Any]]:
             if s["index"] == index:
                 s["locked_country"] = None
                 s["locked_country_code"] = None
+                s["locked_location"] = None
                 save(reg)
                 return s
         return None
+
+
+def norm(s: str) -> str:
+    """Loose text comparison used for country and city matching."""
+    return (s or "").replace(" ", "").replace("-", "").replace(".", "").lower()
 
 
 def country_matches(slot: Dict[str, Any], country: str) -> bool:
@@ -275,8 +289,14 @@ def country_matches(slot: Dict[str, Any], country: str) -> bool:
     locked = slot.get("locked_country")
     if not locked:
         return True          # unpinned slots accept anything
-    norm = lambda x: (x or "").replace(" ", "").replace("-", "").lower()
     return norm(locked) == norm(country)
+
+
+def slot_label(slot: Dict[str, Any]) -> str:
+    """Human-readable 'Country / City' for a slot's pin or current server."""
+    country = slot.get("locked_country") or slot.get("country") or ""
+    location = slot.get("locked_location") or slot.get("location") or ""
+    return f"{country} / {location}" if location else country
 
 
 def occupied_slots() -> List[Dict[str, Any]]:
@@ -532,37 +552,3 @@ def mark_bound(core_id: str, host: str, slot_count: int) -> None:
 
 def binding() -> Dict[str, Any]:
     return load()["panel_binding"]
-
-
-# ----------------------------------------------------------------------
-# Users / Authentication
-# ----------------------------------------------------------------------
-
-def add_user(username: str, password: str) -> None:
-    with _lock:
-        reg = load()
-        for u in reg.setdefault("users", []):
-            if u["username"] == username:
-                u["password"] = password
-                save(reg)
-                return
-        reg["users"].append({"username": username, "password": password})
-        save(reg)
-
-def remove_user(username: str) -> bool:
-    with _lock:
-        reg = load()
-        users = reg.setdefault("users", [])
-        before = len(users)
-        reg["users"] = [u for u in users if u["username"] != username]
-        save(reg)
-        return len(reg["users"]) < before
-
-def get_users() -> List[Dict[str, str]]:
-    return load().setdefault("users", [])
-
-def check_user(username: str, password: str) -> bool:
-    for u in load().setdefault("users", []):
-        if u["username"] == username and u["password"] == password:
-            return True
-    return False
