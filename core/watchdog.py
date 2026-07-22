@@ -17,9 +17,10 @@ from . import engine, registry
 
 log = logging.getLogger("pepecore.watchdog")
 
-CHECK_INTERVAL = 120        # seconds between sweeps
-FAILS_BEFORE_SWAP = 2       # consecutive failures before we replace the server
-BOOT_GRACE = 90             # let handshakes settle after startup
+CHECK_INTERVAL = 15         # seconds between sweeps (Aggressive for discovery)
+HEALTHY_CHECK_INTERVAL = 120 # seconds before re-checking a healthy slot
+FAILS_BEFORE_SWAP = 1       # consecutive failures before we replace the server
+BOOT_GRACE = 15             # let handshakes settle after startup
 SWAP_GAP = 1.5              # pause between swaps, avoids rate limiting
 
 
@@ -29,6 +30,7 @@ class Watchdog:
         self._stop = threading.Event()
         self.stats: Dict = {"cycles": 0, "swaps": 0, "restarts": 0,
                             "repatriated": 0, "displaced": 0, "last_run": None}
+        self._last_checked: Dict[int, float] = {}
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -53,25 +55,48 @@ class Watchdog:
 
     def _sweep(self) -> None:
         import datetime
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         slots = registry.occupied_slots()
         if not slots:
             return
 
         alive = swapped = restarted = repatriated = 0
+        now_ts = time.time()
 
+        to_check = []
         for slot in slots:
             idx = slot["index"]
+            last_chk = self._last_checked.get(idx, 0)
+            if slot.get("last_health") == "up" and (now_ts - last_chk) < HEALTHY_CHECK_INTERVAL:
+                continue
+            to_check.append(slot)
 
-            if engine.probe(slot["port"], timeout=4.0):
+        if not to_check:
+            return
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=30) as executor:
+            futures = {executor.submit(engine.probe_egress, s["port"], 5.0): s for s in to_check}
+            for future in as_completed(futures):
+                s = futures[future]
+                try:
+                    ok, _ = future.result()
+                except Exception:
+                    ok = False
+                results[s["index"]] = ok
+                self._last_checked[s["index"]] = now_ts
+
+        for slot in to_check:
+            idx = slot["index"]
+            ok = results[idx]
+
+            if ok:
                 alive += 1
                 registry.update_slot(
                     idx, fail_streak=0, last_health="up",
                     last_health_at=datetime.datetime.now().isoformat(timespec="seconds"),
                 )
-                # Healthy — but is it in the right country? A slot that fell
-                # back to a neighbour during an outage gets pulled home as
-                # soon as its own country has a working server again.
                 if self._repatriate(slot):
                     repatriated += 1
                 continue
@@ -85,10 +110,6 @@ class Watchdog:
             if streak < FAILS_BEFORE_SWAP:
                 continue
 
-            # Replace with another server. Preference order: same country,
-            # then a neighbour, then anything — a dead slot helps nobody.
-            # The pin is never cleared, so a slot parked on a neighbour gets
-            # pulled home automatically once its own country recovers.
             target_country = engine.slot_country(slot)
             target_location = engine.slot_location(slot)
             candidates = engine.failover_candidates(
